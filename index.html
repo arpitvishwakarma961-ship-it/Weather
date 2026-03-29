@@ -82,6 +82,56 @@
         padding: 18px;
       }
 
+      .forecast {
+        margin-top: 14px;
+      }
+
+      .sectionTitle {
+        margin: 0 0 10px;
+        font-size: 14px;
+        letter-spacing: 0.3px;
+        text-transform: uppercase;
+        color: var(--muted);
+      }
+
+      .forecastGrid {
+        display: grid;
+        grid-template-columns: repeat(5, minmax(0, 1fr));
+        gap: 10px;
+      }
+
+      @media (max-width: 520px) {
+        .forecastGrid {
+          grid-template-columns: repeat(2, minmax(0, 1fr));
+        }
+      }
+
+      .forecastItem {
+        border: 1px solid var(--border);
+        border-radius: 14px;
+        padding: 12px;
+        background: rgba(255, 255, 255, 0.04);
+      }
+
+      .forecastDay {
+        font-weight: 800;
+        font-size: 13px;
+        margin-bottom: 6px;
+      }
+
+      .forecastTemp {
+        font-weight: 900;
+        font-size: 18px;
+        line-height: 1.2;
+      }
+
+      .forecastCond {
+        color: var(--muted);
+        font-size: 12px;
+        text-transform: capitalize;
+        margin-top: 2px;
+      }
+
       .meta {
         color: var(--muted);
         font-size: 14px;
@@ -164,6 +214,12 @@
 
         <div id="statusText" class="status"></div>
       </section>
+
+      <section class="card forecast" aria-live="polite">
+        <h3 class="sectionTitle">5-day forecast</h3>
+        <div id="forecastStatus" class="status">Search for a city to see the forecast.</div>
+        <div id="forecastGrid" class="forecastGrid" hidden></div>
+      </section>
     </div>
 
     <script>
@@ -181,6 +237,12 @@
       const tempValue = document.getElementById("tempValue");
       const conditionText = document.getElementById("conditionText");
       const statusText = document.getElementById("statusText");
+      const forecastStatus = document.getElementById("forecastStatus");
+      const forecastGrid = document.getElementById("forecastGrid");
+
+      function unitSuffix() {
+        return UNITS === "imperial" ? "°F" : "°C";
+      }
 
       function setLoading(isLoading) {
         searchBtn.disabled = isLoading;
@@ -222,6 +284,128 @@
         return { name, temp, condition };
       }
 
+      async function fetchForecast(city) {
+        const q = encodeURIComponent(city);
+        const url =
+          "https://api.openweathermap.org/data/2.5/forecast?q=" +
+          q +
+          "&appid=" +
+          API_KEY +
+          "&units=" +
+          encodeURIComponent(UNITS);
+
+        const res = await fetch(url);
+        const data = await res.json().catch(() => ({}));
+
+        if (!res.ok) {
+          const apiMsg =
+            (data && (data.message || data.error)) || "Forecast request failed. Try again.";
+          throw new Error(apiMsg);
+        }
+
+        return data;
+      }
+
+      function formatDayLabel(date) {
+        return date.toLocaleDateString(undefined, { weekday: "short" });
+      }
+
+      function pick5DaySummaries(forecastJson) {
+        const tzSeconds = typeof forecastJson?.city?.timezone === "number" ? forecastJson.city.timezone : 0;
+        const list = Array.isArray(forecastJson?.list) ? forecastJson.list : [];
+
+        // Group by local date (in the city's timezone), then pick the entry closest to 12:00.
+        const byDate = new Map(); // key: YYYY-MM-DD, value: array of {dt, localDate, hour, temp, cond}
+
+        for (const item of list) {
+          if (!item || typeof item.dt !== "number") continue;
+          const localMs = (item.dt + tzSeconds) * 1000;
+          const d = new Date(localMs);
+          const y = d.getUTCFullYear();
+          const m = String(d.getUTCMonth() + 1).padStart(2, "0");
+          const day = String(d.getUTCDate()).padStart(2, "0");
+          const key = `${y}-${m}-${day}`;
+
+          const hour = d.getUTCHours();
+          const temp = typeof item.main?.temp === "number" ? item.main.temp : null;
+          const cond = item.weather?.[0]?.description || "Unknown";
+
+          const arr = byDate.get(key) || [];
+          arr.push({ dt: item.dt, localMs, hour, temp, cond });
+          byDate.set(key, arr);
+        }
+
+        const keys = Array.from(byDate.keys()).sort();
+        const todayKey = keys[0]; // forecast list starts near "now", so first date is "today"
+        const futureKeys = keys.filter((k) => k !== todayKey).slice(0, 5);
+
+        const out = [];
+        for (const key of futureKeys) {
+          const arr = byDate.get(key) || [];
+          if (!arr.length) continue;
+
+          // Closest to 12:00 local time, fallback to first.
+          let best = arr[0];
+          let bestScore = Math.abs((arr[0].hour ?? 0) - 12);
+          for (const x of arr) {
+            const score = Math.abs((x.hour ?? 0) - 12);
+            if (score < bestScore) {
+              best = x;
+              bestScore = score;
+            }
+          }
+
+          out.push({
+            key,
+            label: formatDayLabel(new Date(best.localMs)),
+            temp: best.temp,
+            cond: best.cond,
+          });
+        }
+
+        return out;
+      }
+
+      function setForecastLoading(isLoading) {
+        forecastGrid.hidden = true;
+        forecastStatus.textContent = isLoading ? "Fetching 5-day forecast..." : "";
+        forecastStatus.classList.remove("error");
+      }
+
+      function setForecastError(message) {
+        forecastGrid.hidden = true;
+        forecastStatus.textContent = message;
+        forecastStatus.classList.add("error");
+      }
+
+      function renderForecast(items) {
+        forecastGrid.innerHTML = "";
+
+        if (!items || items.length === 0) {
+          forecastGrid.hidden = true;
+          forecastStatus.textContent = "No forecast data available.";
+          return;
+        }
+
+        const suffix = unitSuffix();
+        for (const item of items) {
+          const el = document.createElement("div");
+          el.className = "forecastItem";
+
+          const tempText = item.temp === null ? "--" : `${Math.round(item.temp)}${suffix}`;
+
+          el.innerHTML =
+            `<div class="forecastDay">${item.label}</div>` +
+            `<div class="forecastTemp">${tempText}</div>` +
+            `<div class="forecastCond">${item.cond}</div>`;
+
+          forecastGrid.appendChild(el);
+        }
+
+        forecastStatus.textContent = "";
+        forecastGrid.hidden = false;
+      }
+
       searchForm.addEventListener("submit", async (e) => {
         e.preventDefault();
 
@@ -232,19 +416,26 @@
         }
 
         setLoading(true);
+        setForecastLoading(true);
         try {
-          const result = await fetchWeather(city);
+          const [result, forecastJson] = await Promise.all([fetchWeather(city), fetchForecast(city)]);
+
           cityName.textContent = result.name;
-          tempValue.textContent = result.temp === null ? "--" : `${Math.round(result.temp)}°C`;
+          tempValue.textContent =
+            result.temp === null ? "--" : `${Math.round(result.temp)}${unitSuffix()}`;
           conditionText.textContent = result.condition;
           metaText.textContent = "Weather result:";
           statusText.textContent = "";
           statusText.classList.remove("error");
+
+          const forecastItems = pick5DaySummaries(forecastJson);
+          renderForecast(forecastItems);
         } catch (err) {
           cityName.textContent = "-";
           tempValue.textContent = "--";
           conditionText.textContent = "--";
           showError(err && err.message ? err.message : "Something went wrong.");
+          setForecastError(err && err.message ? err.message : "Could not fetch forecast.");
         } finally {
           setLoading(false);
         }
